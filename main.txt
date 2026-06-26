@@ -1,0 +1,806 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+local Settings = {
+    Hitbox = false, HitboxSize = 5, ArmedCheck = false, TeamCheck = true,
+    ESP = false,
+    Fly = false, FlySpeed = 50, Noclip = false,
+    AntiAim = "Off", SpinSpeed = 30, JitterMode = "Random", JitterAngle = 10, JitterSpeed = 30,
+    FakeLag = false, FakeLagMode = "Classic", FakeLagTicks = 5, FakeLagAmplitude = 0.3,
+    HudEnabled = false,
+}
+
+-- Конфиг-система
+local Config = {
+    CurrentName = "Default",
+    Folder = "MeowConfigs",
+    LastFile = "lastconfig.txt",
+}
+
+local function hasWriteFile()
+    return pcall(function() writefile("test.txt", "test") end)
+end
+
+local function getConfigPath(name)
+    return Config.Folder .. "/" .. name .. ".json"
+end
+
+local function saveConfigToFile(name, data)
+    if not hasWriteFile() then return false end
+    local path = getConfigPath(name)
+    local success, err = pcall(function()
+        writefile(path, game:GetService("HttpService"):JSONEncode(data))
+    end)
+    if not success then warn("Save failed:", err) return false end
+    return true
+end
+
+local function loadConfigFromFile(name)
+    if not hasWriteFile() then return nil end
+    local path = getConfigPath(name)
+    local success, data = pcall(function()
+        return readfile(path)
+    end)
+    if not success then return nil end
+    local decoded = game:GetService("HttpService"):JSONDecode(data)
+    return decoded
+end
+
+local function listConfigFiles()
+    if not hasWriteFile() then return {} end
+    local success, files = pcall(function()
+        return listfiles(Config.Folder)
+    end)
+    if not success then return {} end
+    local names = {}
+    for _, file in ipairs(files) do
+        local name = string.match(file, "([^/\\]+)%.json$")
+        if name then table.insert(names, name) end
+    end
+    return names
+end
+
+local function deleteConfigFile(name)
+    if not hasWriteFile() then return false end
+    local path = getConfigPath(name)
+    local success = pcall(function()
+        delfile(path)
+    end)
+    return success
+end
+
+local function exportToClipboard()
+    local data = { Version = "10.0", Name = Config.CurrentName, Date = os.date("%Y-%m-%d %H:%M:%S"), Settings = Settings }
+    local json = game:GetService("HttpService"):JSONEncode(data)
+    if setclipboard then setclipboard(json); return true end
+    return false
+end
+
+local function importFromClipboard()
+    if not getclipboard then return nil end
+    local json = getclipboard()
+    if not json or json == "" then return nil end
+    local decoded = game:GetService("HttpService"):JSONDecode(json)
+    return decoded
+end
+
+local function saveLastConfig(name)
+    if hasWriteFile() then pcall(function() writefile(Config.LastFile, name) end) end
+end
+
+local function loadLastConfig()
+    if hasWriteFile() then
+        local success, name = pcall(function() return readfile(Config.LastFile) end)
+        if success and name and name ~= "" then return name end
+    end
+    return nil
+end
+
+-- ===== GUI =====
+local playerGui = LocalPlayer:FindFirstChild("PlayerGui") or Instance.new("PlayerGui", LocalPlayer)
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "MeowGUI"
+screenGui.Parent = playerGui
+screenGui.ResetOnSpawn = false
+
+-- ===== HUD (3 ПЛАШКИ В РЯД, ПРОЗРАЧНЫЙ ФОН, ПЕРЕТАСКИВАНИЕ) =====
+local hudContainer = Instance.new("Frame")
+hudContainer.Name = "HUDContainer"
+hudContainer.Parent = screenGui
+hudContainer.BackgroundTransparency = 1 
+hudContainer.Size = UDim2.new(0, 350, 0, 35) -- Чуть меньше, как ты просил
+hudContainer.Position = UDim2.new(0, 10, 0, 10)
+hudContainer.ZIndex = 10
+hudContainer.Visible = false
+
+-- Сетка в одну строку (3 колонки)
+local grid = Instance.new("UIGridLayout")
+grid.Parent = hudContainer
+grid.CellSize = UDim2.new(0.33, -4, 1, -4) -- 3 плашки, отступы
+grid.CellPadding = UDim2.new(0, 4, 0, 0)
+grid.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Функция создания плашек
+local function createTile(parent, order, text, textColor, textSize)
+    local tile = Instance.new("Frame")
+    tile.Parent = parent
+    tile.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+    tile.LayoutOrder = order
+    Instance.new("UICorner", tile).CornerRadius = UDim.new(0, 6)
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Parent = tile
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(1, -4, 1, 0)
+    lbl.Position = UDim2.new(0, 2, 0, 0)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.Text = text
+    lbl.TextColor3 = textColor or Color3.fromRGB(255, 255, 255)
+    lbl.TextSize = textSize or 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Center
+    lbl.TextYAlignment = Enum.TextYAlignment.Center
+    return lbl
+end
+
+-- 1. Meow Lua (синий, без точки)
+local lblMeow = createTile(hudContainer, 1, "Meow Lua", Color3.fromRGB(0, 180, 255), 14)
+
+-- 2. Никнейм
+local lblNick = createTile(hudContainer, 2, LocalPlayer.Name, Color3.fromRGB(255, 255, 255), 13)
+
+-- 3. FPS (Пинг удалён по твоей просьбе)
+local lblFps = createTile(hudContainer, 3, "FPS: 0", Color3.fromRGB(255, 255, 255), 13)
+
+-- Перетаскивание HUD
+local dragging, dragInput, dragStart, startPos = false
+hudContainer.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = hudContainer.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        hudContainer.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- ===== Основное меню =====
+local mainFrame = Instance.new("Frame")
+mainFrame.Parent = screenGui
+mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+mainFrame.BorderSizePixel = 0
+mainFrame.Position = UDim2.new(0.5, -350, 0.5, -275)
+mainFrame.Size = UDim2.new(0, 700, 0, 550)
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
+mainFrame.Visible = false
+
+local titleBar = Instance.new("Frame")
+titleBar.Parent = mainFrame
+titleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+titleBar.Size = UDim2.new(1, 0, 0, 35)
+titleBar.BorderSizePixel = 0
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Parent = titleBar
+titleLabel.BackgroundTransparency = 1
+titleLabel.Size = UDim2.new(1, -35, 1, 0)
+titleLabel.Position = UDim2.new(0, 10, 0, 0)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.Text = "⚙ MEOW RBX v10.0"
+titleLabel.TextColor3 = Color3.fromRGB(0, 200, 255)
+titleLabel.TextSize = 20
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Parent = titleBar
+closeBtn.BackgroundTransparency = 1
+closeBtn.Size = UDim2.new(0, 35, 1, 0)
+closeBtn.Position = UDim2.new(1, -35, 0, 0)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Text = "✕"
+closeBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+closeBtn.TextSize = 18
+closeBtn.MouseButton1Click:Connect(function() mainFrame.Visible = false end)
+
+local dragMenu, dragOffsetMenu, dragPosMenu = false
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragMenu = true
+        dragOffsetMenu = input.Position
+        dragPosMenu = mainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragMenu = false end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragMenu and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragOffsetMenu
+        mainFrame.Position = UDim2.new(dragPosMenu.X.Scale, dragPosMenu.X.Offset + delta.X, dragPosMenu.Y.Scale, dragPosMenu.Y.Offset + delta.Y)
+    end
+end)
+
+local tabs = {"Combat", "Visuals", "Movement", "Anti-Aim", "FakeLag", "Configs", "INFO"}
+local tabButtons = {}
+local contentPanels = {}
+
+local tabContainer = Instance.new("Frame")
+tabContainer.Parent = mainFrame
+tabContainer.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+tabContainer.Position = UDim2.new(0, 0, 0, 35)
+tabContainer.Size = UDim2.new(1, 0, 0, 30)
+tabContainer.BorderSizePixel = 0
+
+for i, tabName in ipairs(tabs) do
+    local btn = Instance.new("TextButton")
+    btn.Parent = tabContainer
+    btn.BackgroundColor3 = (i == 1) and Color3.fromRGB(0, 180, 255) or Color3.fromRGB(45, 45, 50)
+    btn.BorderSizePixel = 0
+    btn.Size = UDim2.new(1 / #tabs, 0, 1, 0)
+    btn.Position = UDim2.new((i - 1) / #tabs, 0, 0, 0)
+    btn.Font = Enum.Font.GothamBold
+    btn.Text = tabName:upper()
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 12
+    tabButtons[tabName] = btn
+
+    local panel = Instance.new("Frame")
+    panel.Parent = mainFrame
+    panel.BackgroundTransparency = 1
+    panel.Position = UDim2.new(0, 10, 0, 70)
+    panel.Size = UDim2.new(1, -20, 1, -85)
+    panel.Visible = (i == 1)
+    contentPanels[tabName] = panel
+
+    btn.MouseButton1Click:Connect(function()
+        for _, b in pairs(tabButtons) do b.BackgroundColor3 = Color3.fromRGB(45, 45, 50) end
+        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 255)
+        for name, p in pairs(contentPanels) do p.Visible = (name == tabName) end
+    end)
+end
+
+local widgetRefs = { toggles = {}, sliders = {}, dropdowns = {} }
+
+local function applyAllSettings()
+    for key, btn in pairs(widgetRefs.toggles) do
+        local state = Settings[key]
+        btn.BackgroundColor3 = state and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(60, 60, 70)
+    end
+    for key, data in pairs(widgetRefs.sliders) do
+        local val = Settings[key]
+        data.fill.Size = UDim2.new((val - data.min) / (data.max - data.min), 0, 1, 0)
+        data.label.Text = data.labelText .. " : " .. tostring(val)
+    end
+    for key, btn in pairs(widgetRefs.dropdowns) do
+        btn.Text = tostring(Settings[key])
+    end
+    updateAADynamics(); updateFLDynamics()
+end
+
+local function CreateToggle(parent, label, settingKey, default, y, callback)
+    Settings[settingKey] = default
+    local frame = Instance.new("Frame")
+    frame.Parent = parent
+    frame.BackgroundColor3 = Color3.fromRGB(40, 40, 47)
+    frame.Position = UDim2.new(0, 0, 0, y)
+    frame.Size = UDim2.new(1, 0, 0, 30)
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Parent = frame
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(0.65, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.Font = Enum.Font.Gotham
+    lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(230, 230, 230)
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local btn = Instance.new("TextButton")
+    btn.Parent = frame
+    btn.BackgroundColor3 = default and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(60, 60, 70)
+    btn.Position = UDim2.new(1, -50, 0.5, -12)
+    btn.Size = UDim2.new(0, 40, 0, 24)
+    btn.Text = ""
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+    local state = default
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        Settings[settingKey] = state
+        btn.BackgroundColor3 = state and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(60, 60, 70)
+        if callback then callback() end
+    end)
+    widgetRefs.toggles[settingKey] = btn
+    return frame
+end
+
+local function CreateSlider(parent, label, settingKey, minVal, maxVal, default, y, step)
+    step = step or 1
+    Settings[settingKey] = default
+    local frame = Instance.new("Frame")
+    frame.Parent = parent
+    frame.BackgroundColor3 = Color3.fromRGB(40, 40, 47)
+    frame.Position = UDim2.new(0, 0, 0, y)
+    frame.Size = UDim2.new(1, 0, 0, 52)
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Parent = frame
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(0.75, 0, 0, 22)
+    lbl.Position = UDim2.new(0, 10, 0, 2)
+    lbl.Font = Enum.Font.Gotham
+    lbl.Text = label .. " : " .. tostring(default)
+    lbl.TextColor3 = Color3.fromRGB(230, 230, 230)
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local bg = Instance.new("Frame")
+    bg.Parent = frame
+    bg.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    bg.Position = UDim2.new(0, 10, 0, 28)
+    bg.Size = UDim2.new(1, -20, 0, 6)
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 3)
+
+    local fill = Instance.new("Frame")
+    fill.Parent = bg
+    fill.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+    fill.Size = UDim2.new((default - minVal) / (maxVal - minVal), 0, 1, 0)
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 3)
+
+    local dragging = false
+    local function update(input)
+        local rel = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
+        local val = math.round((minVal + (maxVal - minVal) * rel) / step) * step
+        val = math.clamp(val, minVal, maxVal)
+        Settings[settingKey] = val
+        fill.Size = UDim2.new((val - minVal) / (maxVal - minVal), 0, 1, 0)
+        lbl.Text = label .. " : " .. tostring(val)
+    end
+
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; update(input) end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then update(input) end
+    end)
+
+    widgetRefs.sliders[settingKey] = { fill = fill, label = lbl, labelText = label, min = minVal, max = maxVal }
+    return frame
+end
+
+local function CreateDropdown(parent, label, settingKey, options, default, y, callback)
+    Settings[settingKey] = default
+    local frame = Instance.new("Frame")
+    frame.Parent = parent
+    frame.BackgroundColor3 = Color3.fromRGB(40, 40, 47)
+    frame.Position = UDim2.new(0, 0, 0, y)
+    frame.Size = UDim2.new(1, 0, 0, 38)
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Parent = frame
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(0.5, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.Font = Enum.Font.Gotham
+    lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(230, 230, 230)
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local btn = Instance.new("TextButton")
+    btn.Parent = frame
+    btn.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+    btn.Position = UDim2.new(0.55, 0, 0.5, -14)
+    btn.Size = UDim2.new(0.4, -10, 0, 28)
+    btn.Font = Enum.Font.Gotham
+    btn.Text = default
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 12
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+    local isOpen = false; local list = nil
+    btn.MouseButton1Click:Connect(function()
+        if isOpen then if list then list:Destroy() end isOpen = false return end
+        isOpen = true
+        list = Instance.new("Frame")
+        list.Parent = frame
+        list.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+        list.Position = UDim2.new(0.55, 0, 1, 2)
+        list.Size = UDim2.new(0.4, -10, 0, #options * 24)
+        Instance.new("UICorner", list).CornerRadius = UDim.new(0, 4)
+        for i, opt in ipairs(options) do
+            local b = Instance.new("TextButton")
+            b.Parent = list
+            b.BackgroundColor3 = (opt == Settings[settingKey]) and Color3.fromRGB(0, 180, 255) or Color3.fromRGB(50, 50, 60)
+            b.Size = UDim2.new(1, 0, 0, 24)
+            b.Position = UDim2.new(0, 0, 0, (i - 1) * 24)
+            b.Font = Enum.Font.Gotham
+            b.Text = opt
+            b.TextColor3 = Color3.fromRGB(255, 255, 255)
+            b.TextSize = 12
+            b.MouseButton1Click:Connect(function()
+                Settings[settingKey] = opt; btn.Text = opt
+                if list then list:Destroy() end; isOpen = false
+                if callback then callback() end
+            end)
+        end
+    end)
+    widgetRefs.dropdowns[settingKey] = btn
+    return frame
+end
+
+-- ===== Вкладки =====
+local combatPanel = contentPanels["Combat"]
+local y = 0
+CreateToggle(combatPanel, "Hitbox Expander", "Hitbox", false, y); y = y + 35
+CreateSlider(combatPanel, "Hitbox Size", "HitboxSize", 1, 15, 5, y); y = y + 57
+CreateToggle(combatPanel, "Armed Check", "ArmedCheck", false, y); y = y + 35
+CreateToggle(combatPanel, "Team Check", "TeamCheck", true, y)
+
+local visPanel = contentPanels["Visuals"]
+y = 0
+CreateToggle(visPanel, "ESP (Billboard)", "ESP", false, y); y = y + 35
+CreateToggle(visPanel, "HUD (Display)", "HudEnabled", false, y)
+
+local movPanel = contentPanels["Movement"]
+y = 0
+CreateToggle(movPanel, "Fly", "Fly", false, y); y = y + 35
+CreateSlider(movPanel, "Fly Speed", "FlySpeed", 10, 200, 50, y); y = y + 57
+CreateToggle(movPanel, "Noclip", "Noclip", false, y)
+
+local aaPanel = contentPanels["Anti-Aim"]
+y = 0
+local aaModeDropdown = CreateDropdown(aaPanel, "Anti-Aim Mode", "AntiAim", {"Off", "Spin", "Jitter"}, "Off", y, function() updateAADynamics() end)
+y = y + 43
+local jitterModeDropdown = CreateDropdown(aaPanel, "Jitter Mode", "JitterMode", {"Random", "Sway"}, "Random", y + 74, function() updateAADynamics() end)
+jitterModeDropdown.Visible = false
+y = y + 120
+local spinSlider = CreateSlider(aaPanel, "Spin Speed (deg/tick)", "SpinSpeed", 1, 200, 30, y)
+spinSlider.Visible = false
+local jitterAngleSlider = CreateSlider(aaPanel, "Max Angle / Amplitude", "JitterAngle", 1, 45, 10, y + 57)
+jitterAngleSlider.Visible = false
+local jitterSpeedSlider = CreateSlider(aaPanel, "Sway Speed (deg/tick)", "JitterSpeed", 1, 100, 30, y + 114)
+jitterSpeedSlider.Visible = false
+
+function updateAADynamics()
+    local mode = Settings.AntiAim
+    spinSlider.Visible = (mode == "Spin")
+    local showJitter = (mode == "Jitter")
+    jitterModeDropdown.Visible = showJitter
+    if showJitter then
+        local jMode = Settings.JitterMode
+        jitterAngleSlider.Visible = true
+        jitterSpeedSlider.Visible = (jMode == "Sway")
+        local lbl = jitterAngleSlider:FindFirstChildOfClass("TextLabel")
+        if lbl then
+            if jMode == "Random" then lbl.Text = "Max Angle : " .. tostring(Settings.JitterAngle)
+            else lbl.Text = "Amplitude : " .. tostring(Settings.JitterAngle) end
+        end
+    else
+        jitterAngleSlider.Visible = false; jitterSpeedSlider.Visible = false
+    end
+end
+updateAADynamics()
+
+local flPanel = contentPanels["FakeLag"]
+y = 0
+local flToggle = CreateToggle(flPanel, "FakeLag", "FakeLag", false, y, function() updateFLDynamics() end)
+y = y + 35
+local flModeDropdown = CreateDropdown(flPanel, "FakeLag Mode", "FakeLagMode", {"Classic", "Choke", "Teleport", "PacketLoss", "Jitter"}, "Classic", y, function() updateFLDynamics() end)
+flModeDropdown.Visible = false
+y = y + 180
+local flTicksSlider = CreateSlider(flPanel, "Ticks", "FakeLagTicks", 1, 20, 5, y)
+flTicksSlider.Visible = false
+local flAmplitudeSlider = CreateSlider(flPanel, "Amplitude", "FakeLagAmplitude", 0.1, 1, 0.3, y + 57, 0.1)
+flAmplitudeSlider.Visible = false
+
+function updateFLDynamics()
+    local on = Settings.FakeLag
+    flModeDropdown.Visible = on; flTicksSlider.Visible = on
+    flAmplitudeSlider.Visible = (on and Settings.FakeLagMode ~= "Choke")
+end
+updateFLDynamics()
+
+-- ===== Вкладка Configs =====
+local configPanel = contentPanels["Configs"]
+local cy = 0
+local nameBox = Instance.new("TextBox")
+nameBox.Parent = configPanel
+nameBox.BackgroundColor3 = Color3.fromRGB(40, 40, 47)
+nameBox.Position = UDim2.new(0, 5, 0, cy)
+nameBox.Size = UDim2.new(0.6, -10, 0, 30)
+nameBox.Font = Enum.Font.Gotham
+nameBox.Text = "Default"
+nameBox.TextColor3 = Color3.fromRGB(255,255,255)
+nameBox.TextSize = 14
+Instance.new("UICorner", nameBox).CornerRadius = UDim.new(0, 6)
+cy = cy + 35
+
+local function makeBtn(text, x, w)
+    local btn = Instance.new("TextButton")
+    btn.Parent = configPanel
+    btn.BackgroundColor3 = Color3.fromRGB(0, 180, 255)
+    btn.Position = UDim2.new(x, 0, 0, cy)
+    btn.Size = UDim2.new(w, -5, 0, 30)
+    btn.Font = Enum.Font.GothamBold
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255,255,255)
+    btn.TextSize = 12
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+local saveBtn = makeBtn("Save", 0.0, 0.32)
+local loadBtn = makeBtn("Load", 0.34, 0.32)
+local delBtn = makeBtn("Delete", 0.68, 0.32)
+cy = cy + 35
+
+local configListDropdown; local configListOptions = {}
+local function refreshConfigList()
+    local files = listConfigFiles()
+    if #files == 0 then configListOptions = {"Select Config"} else configListOptions = files end
+    if configListDropdown then configListDropdown.Parent = nil end
+    configListDropdown = CreateDropdown(configPanel, "Configs", "ConfigListDummy", configListOptions, configListOptions[1] or "Select Config", cy, function() end)
+    local lbl = configListDropdown:FindFirstChildOfClass("TextLabel")
+    if lbl then lbl.Visible = false end
+    local btn = configListDropdown:FindFirstChildOfClass("TextButton")
+    if btn then btn.Size = UDim2.new(0.9, 0, 0, 28); btn.Position = UDim2.new(0.05, 0, 0.5, -14) end
+    configListDropdown.Position = UDim2.new(0, 0, 0, cy); configListDropdown.Size = UDim2.new(1, 0, 0, 38)
+end
+refreshConfigList()
+cy = cy + 43
+local expBtn = makeBtn("Export to Clipboard", 0.0, 0.48)
+local impBtn = makeBtn("Import from Clipboard", 0.50, 0.48)
+cy = cy + 35
+
+saveBtn.MouseButton1Click:Connect(function()
+    local name = nameBox.Text; if name == "" then name = "Default" end
+    local data = { Version = "10.0", Name = name, Date = os.date("%Y-%m-%d %H:%M:%S"), Settings = Settings }
+    if hasWriteFile() then
+        if saveConfigToFile(name, data) then Config.CurrentName = name; saveLastConfig(name); refreshConfigList(); print("Config saved: " .. name) else warn("Failed to save config") end
+    else
+        if exportToClipboard() then print("Config exported to clipboard") else warn("Cannot save config") end
+    end
+end)
+
+loadBtn.MouseButton1Click:Connect(function()
+    local selected = configListOptions[1]
+    local btn = configListDropdown:FindFirstChildOfClass("TextButton")
+    if btn then selected = btn.Text end
+    if not selected or selected == "Select Config" or selected == "None" then return end
+    local data
+    if hasWriteFile() then data = loadConfigFromFile(selected) else data = importFromClipboard() end
+    if data and data.Settings then
+        for k, v in pairs(data.Settings) do if Settings[k] ~= nil then Settings[k] = v end end
+        Config.CurrentName = selected; saveLastConfig(selected); applyAllSettings(); print("Config loaded: " .. selected)
+    else warn("Failed to load config") end
+end)
+
+delBtn.MouseButton1Click:Connect(function()
+    local selected = configListOptions[1]
+    local btn = configListDropdown:FindFirstChildOfClass("TextButton")
+    if btn then selected = btn.Text end
+    if not selected or selected == "Select Config" or selected == "None" then return end
+    if hasWriteFile() then
+        if deleteConfigFile(selected) then refreshConfigList(); print("Config deleted: " .. selected) else warn("Failed to delete config") end
+    else print("Delete only works with writefile") end
+end)
+
+expBtn.MouseButton1Click:Connect(function()
+    if exportToClipboard() then print("Config exported to clipboard") else warn("Clipboard not available") end
+end)
+
+impBtn.MouseButton1Click:Connect(function()
+    local data = importFromClipboard()
+    if data and data.Settings then
+        for k, v in pairs(data.Settings) do if Settings[k] ~= nil then Settings[k] = v end end
+        nameBox.Text = data.Name or "Imported"; Config.CurrentName = nameBox.Text; applyAllSettings(); print("Config imported")
+    else warn("Invalid clipboard data") end
+end)
+
+-- INFO
+local infoPanel = contentPanels["INFO"]
+local infoText = [[
+Если вы приобрели этот скрипт, то вас обманули!
+If you bought this script, you've been scammed!
+
+Discord: kishlak.bftv
+Spotify/Yandex: Go To Sleep, ZNTH muzic and more
+]]
+local infoLabel = Instance.new("TextLabel")
+infoLabel.Parent = infoPanel
+infoLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+infoLabel.Position = UDim2.new(0, 5, 0, 5)
+infoLabel.Size = UDim2.new(1, -10, 0, 200)
+infoLabel.Font = Enum.Font.Gotham
+infoLabel.Text = infoText
+infoLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+infoLabel.TextSize = 14
+infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+infoLabel.TextYAlignment = Enum.TextYAlignment.Top
+infoLabel.TextWrapped = true
+Instance.new("UICorner", infoLabel).CornerRadius = UDim.new(0, 8)
+
+-- ===== Основная логика =====
+local espBillboards = {}
+local function updateESP()
+    for _, obj in ipairs(espBillboards) do pcall(function() obj:Destroy() end) end
+    espBillboards = {}
+    if not Settings.ESP then return end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local char = player.Character; local root = char.HumanoidRootPart; local hum = char:FindFirstChild("Humanoid")
+            if hum and hum.Health > 0 then
+                local valid = true
+                if Settings.TeamCheck and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then valid = false end
+                if Settings.ArmedCheck and valid then
+                    local hasWeapon = char:FindFirstChildOfClass("Tool") or (player:FindFirstChild("Backpack") and player.Backpack:FindFirstChildOfClass("Tool"))
+                    if not hasWeapon then valid = false end
+                end
+                if valid then
+                    local bgui = Instance.new("BillboardGui")
+                    bgui.Parent = root; bgui.Adornee = root; bgui.Size = UDim2.new(0, 100, 0, 30); bgui.StudsOffset = Vector3.new(0, 2.5, 0); bgui.AlwaysOnTop = true
+                    local frame = Instance.new("Frame"); frame.Parent = bgui; frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0); frame.BackgroundTransparency = 0.5; frame.Size = UDim2.new(1, 0, 1, 0); Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 4)
+                    local label = Instance.new("TextLabel"); label.Parent = frame; label.BackgroundTransparency = 1; label.Size = UDim2.new(1, 0, 1, 0); label.Font = Enum.Font.GothamBold; label.TextColor3 = Color3.fromRGB(255, 255, 255); label.TextSize = 14; label.Text = string.format("[%dm]", math.floor((root.Position - Camera.CFrame.Position).Magnitude))
+                    table.insert(espBillboards, bgui)
+                end
+            end
+        end
+    end
+end
+
+local lastESPUpdate = 0
+local tickCounter = 0
+local jitterAngle = 0
+local flyVelocity, flyGyro = nil, nil
+local fakeLagState = 0
+
+-- Счётчики для FPS
+local fpsCounter = 0
+local fpsTimer = tick()
+
+local function onCharacterAdded(newChar)
+    if flyVelocity then flyVelocity:Destroy(); flyVelocity = nil end
+    if flyGyro then flyGyro:Destroy(); flyGyro = nil end
+end
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+RunService.RenderStepped:Connect(function(dt)
+    -- Обновление HUD (Пинг вырезан, осталось 3 плашки)
+    if Settings.HudEnabled then
+        hudContainer.Visible = true
+        
+        -- FPS (счётчик кадров в секунду)
+        fpsCounter = fpsCounter + 1
+        if tick() - fpsTimer >= 1 then
+            lblFps.Text = "FPS: " .. tostring(fpsCounter)
+            fpsCounter = 0
+            fpsTimer = tick()
+        end
+    else
+        hudContainer.Visible = false
+    end
+
+    if tick() - lastESPUpdate > 0.5 then lastESPUpdate = tick(); updateESP() end
+
+    local char = LocalPlayer.Character
+    if not char or not char.Parent then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+    if not root or not hum then return end
+
+    if Settings.Noclip then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
+        end
+    end
+
+    if Settings.Fly then
+        if not flyVelocity then
+            flyVelocity = Instance.new("BodyVelocity"); flyVelocity.MaxForce = Vector3.new(4000, 4000, 4000); flyVelocity.Parent = root
+            flyGyro = Instance.new("BodyGyro"); flyGyro.MaxTorque = Vector3.new(4000, 4000, 4000); flyGyro.Parent = root
+        end
+        local cam = Camera
+        local move = Vector3.new(0, 0, 0)
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then move = move + cam.CFrame.LookVector * Vector3.new(1, 0, 1) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then move = move - cam.CFrame.LookVector * Vector3.new(1, 0, 1) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then move = move - cam.CFrame.RightVector * Vector3.new(1, 0, 1) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then move = move + cam.CFrame.RightVector * Vector3.new(1, 0, 1) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then move = move - Vector3.new(0, 1, 0) end
+        if move.Magnitude > 0 then move = move.Unit * Settings.FlySpeed end
+        flyVelocity.Velocity = move; flyGyro.CFrame = cam.CFrame
+    else
+        if flyVelocity then flyVelocity:Destroy(); flyVelocity = nil end
+        if flyGyro then flyGyro:Destroy(); flyGyro = nil end
+    end
+
+    if Settings.AntiAim ~= "Off" and root then
+        if Settings.AntiAim == "Spin" then
+            root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(Settings.SpinSpeed), 0)
+        elseif Settings.AntiAim == "Jitter" then
+            if Settings.JitterMode == "Random" then
+                local rx = math.rad(math.random(-Settings.JitterAngle, Settings.JitterAngle))
+                local ry = math.rad(math.random(-Settings.JitterAngle, Settings.JitterAngle))
+                root.CFrame = root.CFrame * CFrame.Angles(rx, ry, 0)
+            elseif Settings.JitterMode == "Sway" then
+                jitterAngle = jitterAngle + math.rad(Settings.JitterSpeed)
+                local angle = math.sin(jitterAngle) * math.rad(Settings.JitterAngle)
+                root.CFrame = root.CFrame * CFrame.Angles(0, angle, 0)
+            end
+        end
+    end
+
+    if Settings.FakeLag then
+        tickCounter = tickCounter + 1
+        if tickCounter >= Settings.FakeLagTicks then
+            tickCounter = 0
+            local mode = Settings.FakeLagMode
+            if mode == "Classic" then
+                local back = root.CFrame.LookVector * -Settings.FakeLagAmplitude
+                root.CFrame = root.CFrame + back
+            elseif mode == "Choke" then
+                hum.PlatformStand = true; root.Velocity = Vector3.new(0, 0, 0)
+                spawn(function() wait(0.05); if hum and hum.Parent then hum.PlatformStand = false end end)
+            elseif mode == "Teleport" then
+                local dir = root.CFrame.LookVector
+                if fakeLagState == 0 then root.CFrame = root.CFrame + dir * Settings.FakeLagAmplitude; fakeLagState = 1
+                else root.CFrame = root.CFrame - dir * Settings.FakeLagAmplitude; fakeLagState = 0 end
+            elseif mode == "PacketLoss" then
+                if math.random() < 0.3 then
+                    local back = root.CFrame.LookVector * -Settings.FakeLagAmplitude
+                    root.CFrame = root.CFrame + back
+                end
+            elseif mode == "Jitter" then
+                local offset = Vector3.new(math.random(-100, 100) / 100 * Settings.FakeLagAmplitude, 0, math.random(-100, 100) / 100 * Settings.FakeLagAmplitude)
+                root.CFrame = root.CFrame + offset
+            end
+        end
+    else
+        tickCounter = 0; fakeLagState = 0
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local targetRoot = player.Character:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                if Settings.Hitbox then
+                    targetRoot.Size = Vector3.new(Settings.HitboxSize, Settings.HitboxSize, Settings.HitboxSize)
+                    targetRoot.Color = Color3.fromRGB(255, 0, 0); targetRoot.Material = Enum.Material.Neon; targetRoot.Transparency = 0.5; targetRoot.CanCollide = false
+                else
+                    targetRoot.Size = Vector3.new(2, 2, 1); targetRoot.Transparency = 1
+                end
+            end
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if not gp and input.KeyCode == Enum.KeyCode.Insert then
+        mainFrame.Visible = not mainFrame.Visible
+    end
+end)
+
+-- Автозагрузка последнего конфига
+local last = loadLastConfig()
+if last and last ~= "" then
+    local data = loadConfigFromFile(last)
+    if data and data.Settings then
+        for k, v in pairs(data.Settings) do if Settings[k] ~= nil then Settings[k] = v end end
+        Config.CurrentName = last; nameBox.Text = last; applyAllSettings(); print("Loaded last config: " .. last)
+    end
+end
